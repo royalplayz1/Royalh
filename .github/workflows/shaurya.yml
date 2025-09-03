@@ -1,0 +1,117 @@
+name: Continuous Persistent VPS
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # Every 6 hours
+  workflow_dispatch:
+
+jobs:
+  vps-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      # Checkout repository
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # Download previous backup (if any)
+      - name: Download previous backup
+        uses: actions/download-artifact@v4
+        with:
+          name: vps-backup
+          path: ./backup
+        continue-on-error: true
+
+      - name: Restore previous backup
+        run: |
+          if [ -f ./backup/backup.zip ]; then
+            echo "📦 Restoring previous session..."
+            unzip -o ./backup/backup.zip -d /
+          else
+            echo "⚡ No backup found, starting fresh"
+          fi
+
+      # Set hostname
+      - name: Set hostname
+        run: sudo hostnamectl set-hostname royal-vps
+
+      # Install prerequisites
+      - name: Install prerequisites
+        run: |
+          sudo apt update
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch rsync
+
+      # Install Tailscale
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+      # Restore Tailscale state
+      - name: Restore Tailscale state
+        run: |
+          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+          fi
+
+      # Start Tailscale
+      - name: Start Tailscale
+        run: |
+          if ! pgrep tailscaled >/dev/null; then
+            sudo tailscaled &
+            sleep 8
+          fi
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=royal-vps-${GITHUB_RUN_ID} --force-reauth || echo "Tailscale already up"
+
+      # Create user with sudo
+      - name: Create user royaluser with sudo
+        run: |
+          if ! id -u royaluser >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash royaluser
+            echo "royaluser:Royal1234" | sudo chpasswd
+            sudo usermod -aG sudo royaluser
+            echo "royaluser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/royaluser
+          fi
+
+      # Start tmate session
+      - name: Start tmate session for SSH access
+        uses: mxschmitt/action-tmate@v3
+
+      - name: Show Tailscale IP
+        run: |
+          echo "🔗 Tailscale IP:"
+          tailscale ip -4 || echo "Tailscale IP not available"
+          echo "✅ tmate session info printed above"
+
+      # Keep VPS alive
+      - name: Keep VPS alive
+        run: sleep 345m
+
+      # Sync and update backup
+      - name: Sync and update backup
+        run: |
+          BACKUP_DIR=/opt/vps-backup
+          sudo mkdir -p "$BACKUP_DIR/data"
+          sudo chown -R $USER:$USER "$BACKUP_DIR"
+
+          echo "🔄 Syncing important files..."
+          rsync -av --progress /home/runner/work/Royalh/Royalh "$BACKUP_DIR/bot_backup" 2>/dev/null || true
+          rsync -av --progress $HOME/.config "$BACKUP_DIR/config_backup" 2>/dev/null || true
+          rsync -av --progress $HOME/scripts "$BACKUP_DIR/scripts_backup" 2>/dev/null || true
+          rsync -av --progress /var/lib/tailscale/tailscaled.state "$BACKUP_DIR/data/" 2>/dev/null || true
+
+          cd $BACKUP_DIR
+          rm -f backup.zip
+          zip -r backup.zip ./*
+          echo "✅ Backup updated!"
+
+      # Upload VPS backup artifact
+      - name: Upload VPS backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup
+          path: /opt/vps-backup/backup.zip
+          overwrite: true
+          
