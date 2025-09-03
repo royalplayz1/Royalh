@@ -1,21 +1,19 @@
-name: Continuous Persistent VPS
+name: Quick Test Persistent VPS
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'   # Every 6 hours
-  workflow_dispatch:
+  workflow_dispatch:   # Manual trigger for testing
 
 jobs:
   vps-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 10   # Short timeout for quick test
 
     steps:
-      # Checkout repository
+      # Checkout repo (optional)
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Download previous backup (if any)
+      # Download previous backup artifact
       - name: Download previous backup
         uses: actions/download-artifact@v4
         with:
@@ -23,11 +21,12 @@ jobs:
           path: ./backup
         continue-on-error: true
 
+      # Restore previous backup
       - name: Restore previous backup
         run: |
           if [ -f ./backup/backup.zip ]; then
             echo "📦 Restoring previous session..."
-            unzip -o ./backup/backup.zip -d /
+            unzip -o ./backup/backup.zip -d /home/royaluser
           else
             echo "⚡ No backup found, starting fresh"
           fi
@@ -65,7 +64,7 @@ jobs:
           fi
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=royal-vps-${GITHUB_RUN_ID} --force-reauth || echo "Tailscale already up"
 
-      # Create user with sudo
+      # Create user royaluser with sudo
       - name: Create user royaluser with sudo
         run: |
           if ! id -u royaluser >/dev/null 2>&1; then
@@ -75,36 +74,40 @@ jobs:
             echo "royaluser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/royaluser
           fi
 
-      # Start tmate session
-      - name: Start tmate session for SSH access
-        uses: mxschmitt/action-tmate@v3
-
+      # Show Tailscale IP
       - name: Show Tailscale IP
         run: |
           echo "🔗 Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not available"
-          echo "✅ tmate session info printed above"
 
-      # Keep VPS alive
-      - name: Keep VPS alive
-        run: sleep 345m
+      # Keep VPS alive for a short test
+      - name: Keep VPS alive (quick test)
+        run: sleep 2m   # only 2 minutes
 
-      # Sync and update backup
+      # Backup /home/royaluser
       - name: Sync and update backup
         run: |
           BACKUP_DIR=/opt/vps-backup
-          sudo mkdir -p "$BACKUP_DIR/data"
-          sudo chown -R $USER:$USER "$BACKUP_DIR"
+          mkdir -p "$BACKUP_DIR/data"
 
-          echo "🔄 Syncing important files..."
-          rsync -av --progress /home/runner/work/Royalh/Royalh "$BACKUP_DIR/bot_backup" 2>/dev/null || true
-          rsync -av --progress $HOME/.config "$BACKUP_DIR/config_backup" 2>/dev/null || true
-          rsync -av --progress $HOME/scripts "$BACKUP_DIR/scripts_backup" 2>/dev/null || true
+          echo "🔄 Backing up everything in /home/royaluser..."
+          rsync -av --progress /home/royaluser/ "$BACKUP_DIR/user_backup" 2>/dev/null || true
+
+          # Backup Tailscale state
           rsync -av --progress /var/lib/tailscale/tailscaled.state "$BACKUP_DIR/data/" 2>/dev/null || true
 
           cd $BACKUP_DIR
           rm -f backup.zip
           zip -r backup.zip ./*
+          echo "✅ Backup updated!"
+
+      # Upload backup artifact
+      - name: Upload VPS backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup
+          path: /opt/vps-backup/backup.zip
+          overwrite: true
           echo "✅ Backup updated!"
 
       # Upload VPS backup artifact
